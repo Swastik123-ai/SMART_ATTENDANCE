@@ -8,7 +8,7 @@ export default defineConfig({
   plugins: [react()],
   build: {
     rollupOptions: {
-      external: ['jspdf-autotable']
+      external: ['jspdf-autotable', 'react-chartjs-2', 'chart.js']
     }
   }
 })
