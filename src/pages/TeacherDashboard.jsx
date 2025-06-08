@@ -1,12 +1,12 @@
 import React, { useEffect, useState, useMemo } from "react";
-import { getDatabase, ref, onValue } from "firebase/database";
+import { getDatabase, ref, onValue, set, get } from "firebase/database";
 import { app, auth } from "../firebase";
 import { signOut } from "firebase/auth";
 import { useNavigate } from "react-router-dom";
 import StudentStatsModal from "./StudentStatsModal";
 import * as XLSX from "xlsx";
 
-const AttendanceDashboard = () => {
+const TeacherDashboard = () => {
   const [attendanceData, setAttendanceData] = useState([]);
   const [searchTerm, setSearchTerm] = useState("");
   const [filterMode, setFilterMode] = useState("all");
@@ -17,13 +17,26 @@ const AttendanceDashboard = () => {
     () => localStorage.getItem("darkMode") === "true" || false
   );
   const [dateRange, setDateRange] = useState({ from: "", to: "" });
+  const [showAddAttendanceModal, setShowAddAttendanceModal] = useState(false);
+  const [showBulkEntryModal, setShowBulkEntryModal] = useState(false);
+  const [studentList, setStudentList] = useState([]);
+  const [manualAttendance, setManualAttendance] = useState({
+    uid: "",
+    name: "",
+    date: new Date().toISOString().split('T')[0],
+    time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    reason: ""
+  });
+  const [bulkAttendance, setBulkAttendance] = useState([]);
+  const [bulkEntryDate, setBulkEntryDate] = useState(new Date().toISOString().split('T')[0]);
+  const [bulkEntryTime, setBulkEntryTime] = useState(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+  const [bulkEntryReason, setBulkEntryReason] = useState("");
 
   const navigate = useNavigate();
+  const db = getDatabase(app);
 
   useEffect(() => {
-    const db = getDatabase(app);
     const attendanceRef = ref(db, "attendance");
-
     const unsubscribe = onValue(attendanceRef, (snapshot) => {
       const data = snapshot.val();
       const formattedData = [];
@@ -38,6 +51,7 @@ const AttendanceDashboard = () => {
                 name: details.name || "N/A",
                 time: details.time || "N/A",
                 mode: details.mode || "N/A",
+                reason: details.reason || "N/A"
               });
             });
           }
@@ -49,7 +63,23 @@ const AttendanceDashboard = () => {
     });
 
     return () => unsubscribe();
-  }, []);
+  }, [db]);
+
+  // Fetch student list for autocomplete
+  useEffect(() => {
+    const fetchStudents = async () => {
+      const dbRef = ref(db, "students");
+      const snapshot = await get(dbRef);
+      if (snapshot.exists()) {
+        const students = Object.entries(snapshot.val()).map(([uid, student]) => ({
+          uid,
+          name: student.name || "N/A"
+        }));
+        setStudentList(students);
+      }
+    };
+    fetchStudents();
+  }, [db]);
 
   // Save dark mode preference
   useEffect(() => {
@@ -68,6 +98,92 @@ const AttendanceDashboard = () => {
     } catch (err) {
       alert("Logout failed: " + err.message);
     }
+  };
+
+  // Handle manual attendance submission with duplicate check
+  const handleAddManualAttendance = async () => {
+    if (!manualAttendance.uid || !manualAttendance.name || !manualAttendance.date) {
+      alert("Please fill all required fields");
+      return;
+    }
+
+    // Check for duplicate entry
+    const dateRef = ref(db, `attendance/${manualAttendance.date}/${manualAttendance.uid}`);
+    const snapshot = await get(dateRef);
+    if (snapshot.exists()) {
+      if (!confirm("This student already has attendance for this date. Overwrite?")) {
+        return;
+      }
+    }
+
+    try {
+      await set(dateRef, {
+        name: manualAttendance.name,
+        time: manualAttendance.time,
+        mode: "Manual Entry",
+        reason: manualAttendance.reason || "Not specified",
+        timestamp: new Date().toISOString()
+      });
+
+      alert("Attendance added successfully!");
+      setShowAddAttendanceModal(false);
+      resetManualAttendanceForm();
+    } catch (error) {
+      console.error("Error adding manual attendance:", error);
+      alert("Failed to add attendance. Please try again.");
+    }
+  };
+
+  // Handle bulk attendance submission
+  const handleBulkAttendance = async () => {
+    if (bulkAttendance.length === 0) {
+      alert("Please add at least one student");
+      return;
+    }
+
+    try {
+      const updates = {};
+      bulkAttendance.forEach(student => {
+        updates[`attendance/${bulkEntryDate}/${student.uid}`] = {
+          name: student.name,
+          time: bulkEntryTime,
+          mode: "Manual Entry",
+          reason: bulkEntryReason || "Bulk entry",
+          timestamp: new Date().toISOString()
+        };
+      });
+
+      await set(ref(db), updates, { merge: true });
+      alert(`${bulkAttendance.length} attendance records added successfully!`);
+      setShowBulkEntryModal(false);
+      setBulkAttendance([]);
+    } catch (error) {
+      console.error("Error adding bulk attendance:", error);
+      alert("Failed to add bulk attendance. Please try again.");
+    }
+  };
+
+  // Add student to bulk entry list
+  const addToBulkList = (student) => {
+    if (!bulkAttendance.some(s => s.uid === student.uid)) {
+      setBulkAttendance([...bulkAttendance, student]);
+    }
+  };
+
+  // Remove student from bulk entry list
+  const removeFromBulkList = (uid) => {
+    setBulkAttendance(bulkAttendance.filter(student => student.uid !== uid));
+  };
+
+  // Reset manual attendance form
+  const resetManualAttendanceForm = () => {
+    setManualAttendance({
+      uid: "",
+      name: "",
+      date: new Date().toISOString().split('T')[0],
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      reason: ""
+    });
   };
 
   // Filter data based on search term and mode
@@ -159,7 +275,7 @@ const AttendanceDashboard = () => {
 
     filteredData.forEach(({ uid, mode }) => {
       if (!stats[uid]) stats[uid] = { present: 0, total: 0 };
-      if (mode === "Fingerprint") stats[uid].present++;
+      if (mode === "Fingerprint" || mode === "Manual Entry") stats[uid].present++;
       stats[uid].total++;
     });
 
@@ -197,7 +313,7 @@ const AttendanceDashboard = () => {
       
       // Update attendance based on actual data
       filteredData.forEach(({ uid, date, mode }) => {
-        if (mode === "Fingerprint") {
+        if (mode === "Fingerprint" || mode === "Manual Entry") {
           studentAttendance[uid].present++;
           studentAttendance[uid].attendanceByDate[date] = 'P';
         }
@@ -264,10 +380,28 @@ const AttendanceDashboard = () => {
         } px-6 py-4`}
       >
         <h1 className="text-2xl font-extrabold tracking-wide text-indigo-700 select-none">
-          Smart Attendance Dashboard
+          Teacher Attendance Dashboard
         </h1>
 
         <div className="flex items-center gap-3">
+          {/* Add Manual Attendance Button */}
+          <button
+            onClick={() => setShowAddAttendanceModal(true)}
+            className="bg-blue-600 hover:bg-blue-700 text-white font-semibold px-4 py-2 rounded-md shadow-md transition duration-200"
+            title="Add Manual Attendance"
+          >
+            Add Attendance
+          </button>
+
+          {/* Bulk Entry Button */}
+          <button
+            onClick={() => setShowBulkEntryModal(true)}
+            className="bg-purple-600 hover:bg-purple-700 text-white font-semibold px-4 py-2 rounded-md shadow-md transition duration-200"
+            title="Bulk Entry"
+          >
+            Bulk Entry
+          </button>
+
           {/* Dark Mode Toggle */}
           <button
             onClick={() => setDarkMode(!darkMode)}
@@ -430,6 +564,7 @@ const AttendanceDashboard = () => {
                       <th className="px-6 py-3 border border-indigo-200">Streak 🔥</th>
                       <th className="px-6 py-3 border border-indigo-200">Time</th>
                       <th className="px-6 py-3 border border-indigo-200">Mode</th>
+                      <th className="px-6 py-3 border border-indigo-200">Reason</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -461,11 +596,13 @@ const AttendanceDashboard = () => {
                           <td className="border border-indigo-200 px-6 py-3 capitalize">
                             <span className={`px-2 py-1 rounded-full text-xs ${
                               entry.mode === "Fingerprint" ? "bg-green-100 text-green-800" :
+                              entry.mode === "Manual Entry" ? "bg-blue-100 text-blue-800" :
                               "bg-gray-100 text-gray-800"
                             }`}>
                               {entry.mode}
                             </span>
                           </td>
+                          <td className="border border-indigo-200 px-6 py-3">{entry.reason}</td>
                         </tr>
                       );
                     })}
@@ -556,8 +693,271 @@ const AttendanceDashboard = () => {
           darkMode={darkMode}
         />
       )}
+
+      {/* Add Manual Attendance Modal */}
+      {showAddAttendanceModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div 
+            className="fixed inset-0 bg-black bg-opacity-30"
+            onClick={() => setShowAddAttendanceModal(false)}
+          />
+          <div className={`holographic-container relative w-11/12 max-w-md rounded-xl shadow-xl p-6 ${
+            darkMode ? "bg-gray-800 text-white" : "bg-white text-gray-900"
+          }`}>
+            <div className="holographic-card">
+              <h2 className="text-indigo-600 text-2xl font-bold mb-4">Add Manual Attendance</h2>
+              
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium mb-1">Student UID/Name</label>
+                  <input
+                    type="text"
+                    className={`w-full p-2 rounded-md border ${
+                      darkMode ? "bg-gray-700 border-gray-600" : "bg-white border-gray-300"
+                    }`}
+                    value={manualAttendance.uid}
+                    onChange={(e) => {
+                      const input = e.target.value;
+                      setManualAttendance(prev => ({
+                        ...prev,
+                        uid: input,
+                        name: studentList.find(s => s.uid === input)?.name || prev.name
+                      }));
+                    }}
+                    placeholder="Start typing UID or name"
+                    list="studentAutocomplete"
+                  />
+                  <datalist id="studentAutocomplete">
+                    {studentList.map(student => (
+                      <option key={student.uid} value={student.uid}>
+                        {student.name}
+                      </option>
+                    ))}
+                  </datalist>
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium mb-1">Student Name</label>
+                  <input
+                    type="text"
+                    className={`w-full p-2 rounded-md border ${
+                      darkMode ? "bg-gray-700 border-gray-600" : "bg-white border-gray-300"
+                    }`}
+                    value={manualAttendance.name}
+                    onChange={(e) => {
+                      const input = e.target.value;
+                      setManualAttendance(prev => ({
+                        ...prev,
+                        name: input,
+                        uid: studentList.find(s => s.name.toLowerCase() === input.toLowerCase())?.uid || prev.uid
+                      }));
+                    }}
+                    placeholder="Or type name to autocomplete"
+                    list="nameAutocomplete"
+                  />
+                  <datalist id="nameAutocomplete">
+                    {studentList.map(student => (
+                      <option key={student.uid} value={student.name}>
+                        {student.uid}
+                      </option>
+                    ))}
+                  </datalist>
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium mb-1">Date</label>
+                  <input
+                    type="date"
+                    className={`w-full p-2 rounded-md border ${
+                      darkMode ? "bg-gray-700 border-gray-600" : "bg-white border-gray-300"
+                    }`}
+                    value={manualAttendance.date}
+                    onChange={(e) => setManualAttendance({...manualAttendance, date: e.target.value})}
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium mb-1">Time</label>
+                  <input
+                    type="time"
+                    className={`w-full p-2 rounded-md border ${
+                      darkMode ? "bg-gray-700 border-gray-600" : "bg-white border-gray-300"
+                    }`}
+                    value={manualAttendance.time}
+                    onChange={(e) => setManualAttendance({...manualAttendance, time: e.target.value})}
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium mb-1">Reason (Optional)</label>
+                  <select
+                    className={`w-full p-2 rounded-md border ${
+                      darkMode ? "bg-gray-700 border-gray-600" : "bg-white border-gray-300"
+                    }`}
+                    value={manualAttendance.reason}
+                    onChange={(e) => setManualAttendance({...manualAttendance, reason: e.target.value})}
+                  >
+                    <option value="">Select reason</option>
+                    <option value="Fingerprint issue">Fingerprint issue</option>
+                    <option value="Late arrival">Late arrival</option>
+                    <option value="Makeup class">Makeup class</option>
+                    <option value="Other">Other</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="mt-6 flex justify-end space-x-3">
+                <button
+                  onClick={() => setShowAddAttendanceModal(false)}
+                  className="px-4 py-2 rounded-md bg-gray-300 hover:bg-gray-400 text-gray-800 transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleAddManualAttendance}
+                  className="px-4 py-2 rounded-md bg-green-600 hover:bg-green-700 text-white transition"
+                >
+                  Save Attendance
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Entry Modal */}
+      {showBulkEntryModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div 
+            className="fixed inset-0 bg-black bg-opacity-30"
+            onClick={() => setShowBulkEntryModal(false)}
+          />
+          <div className={`holographic-container relative w-11/12 max-w-2xl rounded-xl shadow-xl p-6 ${
+            darkMode ? "bg-gray-800 text-white" : "bg-white text-gray-900"
+          }`}>
+            <div className="holographic-card">
+              <h2 className="text-indigo-600 text-2xl font-bold mb-4">Bulk Attendance Entry</h2>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Date</label>
+                      <input
+                        type="date"
+                        className={`w-full p-2 rounded-md border ${
+                          darkMode ? "bg-gray-700 border-gray-600" : "bg-white border-gray-300"
+                        }`}
+                        value={bulkEntryDate}
+                        onChange={(e) => setBulkEntryDate(e.target.value)}
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Time</label>
+                      <input
+                        type="time"
+                        className={`w-full p-2 rounded-md border ${
+                          darkMode ? "bg-gray-700 border-gray-600" : "bg-white border-gray-300"
+                        }`}
+                        value={bulkEntryTime}
+                        onChange={(e) => setBulkEntryTime(e.target.value)}
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Reason (Optional)</label>
+                      <select
+                        className={`w-full p-2 rounded-md border ${
+                          darkMode ? "bg-gray-700 border-gray-600" : "bg-white border-gray-300"
+                        }`}
+                        value={bulkEntryReason}
+                        onChange={(e) => setBulkEntryReason(e.target.value)}
+                      >
+                        <option value="">Select reason</option>
+                        <option value="Class makeup">Class makeup</option>
+                        <option value="Field trip">Field trip</option>
+                        <option value="Special event">Special event</option>
+                        <option value="Other">Other</option>
+                      </select>
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Add Students</label>
+                      <input
+                        type="text"
+                        className={`w-full p-2 rounded-md border ${
+                          darkMode ? "bg-gray-700 border-gray-600" : "bg-white border-gray-300"
+                        }`}
+                        placeholder="Search by UID or name"
+                        list="bulkStudentAutocomplete"
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && e.target.value) {
+                            const student = studentList.find(s => 
+                              s.uid === e.target.value || 
+                              s.name.toLowerCase() === e.target.value.toLowerCase()
+                            );
+                            if (student) {
+                              addToBulkList(student);
+                              e.target.value = '';
+                            }
+                          }
+                        }}
+                      />
+                      <datalist id="bulkStudentAutocomplete">
+                        {studentList.map(student => (
+                          <option key={student.uid} value={student.uid}>
+                            {student.name}
+                          </option>
+                        ))}
+                      </datalist>
+                    </div>
+                  </div>
+                  
+                  <button
+                    onClick={handleBulkAttendance}
+                    className="mt-4 w-full py-2 rounded-md bg-green-600 hover:bg-green-700 text-white transition"
+                    disabled={bulkAttendance.length === 0}
+                  >
+                    Submit {bulkAttendance.length} Records
+                  </button>
+                </div>
+                
+                <div>
+                  <h3 className="font-medium mb-2">Selected Students ({bulkAttendance.length})</h3>
+                  <div className={`border rounded-md max-h-64 overflow-y-auto ${
+                    darkMode ? "border-gray-600" : "border-gray-300"
+                  }`}>
+                    {bulkAttendance.length > 0 ? (
+                      <ul className="divide-y">
+                        {bulkAttendance.map(student => (
+                          <li key={student.uid} className="p-2 flex justify-between items-center">
+                            <span>
+                              <span className="font-mono text-sm">{student.uid}</span>
+                              <br />
+                              {student.name}
+                            </span>
+                            <button
+                              onClick={() => removeFromBulkList(student.uid)}
+                              className="text-red-500 hover:text-red-700"
+                            >
+                              Remove
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="p-4 text-center text-gray-500">No students added yet</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
 
-export default AttendanceDashboard;
+export default TeacherDashboard;
